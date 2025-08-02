@@ -42,6 +42,56 @@ dp.include_router(router)
 
 logger.info("Бот инициализирован успешно")
 
+# Функция для создания Google таблицы
+async def create_user_sheet(user_id: str, username: str) -> str:
+    """Создает новую Google таблицу для пользователя"""
+    try:
+        # Создаем название таблицы с именем пользователя и датой
+        from datetime import datetime
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        sheet_name = f"Energy Tracker - {username} ({current_date})"
+        
+        # Создаем новую таблицу
+        sheet = client.create(sheet_name)
+        sheet_id = sheet.id
+        
+        # Настраиваем заголовки
+        worksheet = sheet.sheet1
+        headers = [
+            "Дата и время",
+            "Усталость (0-10)",
+            "Настроение (0-10)", 
+            "Сон",
+            "Физическая нагрузка (0-10)",
+            "Умственная нагрузка (0-10)",
+            "Симптомы",
+            "Заметки"
+        ]
+        worksheet.append_row(headers)
+        
+        # Форматируем заголовки (жирный шрифт)
+        worksheet.format('A1:H1', {
+            'textFormat': {'bold': True},
+            'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}
+        })
+        
+        # Настраиваем ширину колонок
+        worksheet.set_column_width(1, 150)  # Дата и время
+        worksheet.set_column_width(2, 120)  # Усталость
+        worksheet.set_column_width(3, 120)  # Настроение
+        worksheet.set_column_width(4, 100)  # Сон
+        worksheet.set_column_width(5, 150)  # Физическая нагрузка
+        worksheet.set_column_width(6, 150)  # Умственная нагрузка
+        worksheet.set_column_width(7, 200)  # Симптомы
+        worksheet.set_column_width(8, 250)  # Заметки
+        
+        logger.info(f"✅ Создана таблица {sheet_id} для пользователя {username}")
+        return sheet_id
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при создании таблицы для пользователя {username}: {e}")
+        raise
+
 # Функции для создания кнопок
 def get_main_keyboard() -> InlineKeyboardMarkup:
     """Создает основную клавиатуру с кнопками"""
@@ -51,8 +101,11 @@ def get_main_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📈 Статус", callback_data="check_status")
         ],
         [
-            InlineKeyboardButton(text="❓ Помощь", callback_data="show_help"),
-            InlineKeyboardButton(text="🔗 Изменить таблицу", callback_data="change_sheet")
+            InlineKeyboardButton(text="➕ Создать таблицу", callback_data="create_sheet"),
+            InlineKeyboardButton(text="🔗 Подключить таблицу", callback_data="connect_sheet")
+        ],
+        [
+            InlineKeyboardButton(text="❓ Помощь", callback_data="show_help")
         ]
     ])
     return keyboard
@@ -115,13 +168,16 @@ async def start(message: Message):
     username = message.from_user.username or "Unknown"
     logger.info(f"Команда /start от пользователя {username} (ID: {user_id})")
     
-    response = """Привет! 👋 Я бот для отслеживания психологического состояния.
+    response = f"""Привет, {username}! 👋 Я бот для отслеживания психологического состояния.
 
 📋 Что я умею:
 • Записывать данные о вашем состоянии в Google таблицы
 • Отслеживать усталость, настроение и качество сна
+• Создавать новые таблицы автоматически
 
-🚀 Используйте кнопки ниже для навигации!"""
+🚀 Выберите действие:
+➕ Создать новую таблицу (рекомендуется)
+🔗 Подключить существующую таблицу"""
     
     await message.reply(response, reply_markup=get_main_keyboard())
     logger.info(f"Отправлен ответ пользователю {username}")
@@ -134,7 +190,8 @@ async def help_command(message: Message):
     
     help_text = """📚 Доступные команды:
 
-🔗 /setsheet <ссылка> - Подключить Google таблицу
+➕ /createsheet - Создать новую Google таблицу (рекомендуется)
+🔗 /setsheet <ссылка> - Подключить существующую таблицу
    Пример: /setsheet https://docs.google.com/spreadsheets/d/...
 
 📊 /track - Начать запись данных о состоянии
@@ -144,10 +201,65 @@ async def help_command(message: Message):
 
 ❓ /help - Показать это сообщение
 
-💡 После подключения таблицы используйте /track для записи данных!"""
+💡 Рекомендуем создать новую таблицу через /createsheet!"""
     
     await message.reply(help_text)
     logger.info(f"Отправлена справка пользователю {username}")
+
+@router.message(Command("createsheet"))
+async def create_sheet(message: Message):
+    """Создает новую Google таблицу для пользователя"""
+    user_id = message.from_user.id
+    username = message.from_user.username or "Unknown"
+    logger.info(f"Команда /createsheet от пользователя {username} (ID: {user_id})")
+    
+    if not google_sheets_available:
+        logger.warning(f"Google Sheets недоступен для пользователя {username}")
+        await message.reply("Google Sheets не настроен. Добавьте файл creds.json для работы с таблицами.")
+        return
+    
+    try:
+        # Создаем новую таблицу
+        await message.reply("🔄 Создаю новую таблицу для вас...")
+        sheet_id = await create_user_sheet(str(user_id), username)
+        
+        # Сохраняем в базу данных
+        try:
+            success = await db.set_user_sheet(str(user_id), sheet_id)
+            if success:
+                # Обновляем локальный словарь
+                user_sheets[str(user_id)] = sheet_id
+                
+                sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+                logger.info(f"Таблица {sheet_id} создана и подключена для пользователя {username}")
+                await message.reply(
+                    f"✅ Таблица создана и подключена!\n\n"
+                    f"🔗 [Открыть таблицу]({sheet_url})\n\n"
+                    f"📊 Теперь вы можете записывать данные о вашем состоянии.",
+                    reply_markup=get_track_keyboard(),
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True
+                )
+            else:
+                logger.error(f"Не удалось сохранить таблицу в БД для пользователя {username}")
+                await message.reply("❌ Ошибка при сохранении таблицы. Попробуйте еще раз.")
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении в БД: {e}")
+            # Сохраняем только в локальный словарь как fallback
+            user_sheets[str(user_id)] = sheet_id
+            sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+            logger.warning(f"Сохранено только в локальный словарь для пользователя {username}")
+            await message.reply(
+                f"✅ Таблица создана! (временное сохранение)\n\n"
+                f"🔗 [Открыть таблицу]({sheet_url})\n\n"
+                f"📊 Теперь вы можете записывать данные о вашем состоянии.",
+                reply_markup=get_track_keyboard(),
+                parse_mode="Markdown",
+                disable_web_page_preview=True
+            )
+    except Exception as e:
+        logger.error(f"Ошибка при создании таблицы для пользователя {username}: {str(e)}")
+        await message.reply(f"❌ Ошибка при создании таблицы: {str(e)}")
 
 @router.message(Command("setsheet"))
 async def set_sheet(message: Message):
@@ -320,10 +432,54 @@ async def handle_callback(callback: CallbackQuery, state: FSMContext):
         
         await callback.message.edit_text(status_text, reply_markup=get_main_keyboard(), parse_mode="Markdown", disable_web_page_preview=True)
         
+    elif data == "create_sheet":
+        if not google_sheets_available:
+            await callback.answer("❌ Google Sheets недоступен!", show_alert=True)
+            return
+        
+        await callback.answer("🔄 Создаю таблицу...")
+        try:
+            sheet_id = await create_user_sheet(str(user_id), username)
+            
+            # Сохраняем в базу данных
+            success = await db.set_user_sheet(str(user_id), sheet_id)
+            if success:
+                user_sheets[str(user_id)] = sheet_id
+                sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+                
+                await callback.message.edit_text(
+                    f"✅ Таблица создана и подключена!\n\n"
+                    f"🔗 [Открыть таблицу]({sheet_url})\n\n"
+                    f"📊 Теперь вы можете записывать данные о вашем состоянии.",
+                    reply_markup=get_main_keyboard(),
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True
+                )
+            else:
+                await callback.message.edit_text(
+                    "❌ Ошибка при сохранении таблицы. Попробуйте еще раз.",
+                    reply_markup=get_main_keyboard()
+                )
+        except Exception as e:
+            logger.error(f"Ошибка при создании таблицы: {e}")
+            await callback.message.edit_text(
+                f"❌ Ошибка при создании таблицы: {str(e)}",
+                reply_markup=get_main_keyboard()
+            )
+    
+    elif data == "connect_sheet":
+        await callback.message.edit_text(
+            "🔗 Отправьте ссылку на Google таблицу:\n\n"
+            "Или используйте команду:\n"
+            "/setsheet <ссылка_на_таблицу>",
+            reply_markup=get_main_keyboard()
+        )
+        
     elif data == "show_help":
         help_text = """📚 Доступные команды:
 
-🔗 /setsheet <ссылка> - Подключить Google таблицу
+➕ /createsheet - Создать новую Google таблицу
+🔗 /setsheet <ссылка> - Подключить существующую таблицу
 📊 /track - Начать запись данных о состоянии
 📈 /status - Проверить подключенную таблицу
 ❓ /help - Показать это сообщение
@@ -331,12 +487,6 @@ async def handle_callback(callback: CallbackQuery, state: FSMContext):
 💡 Используйте кнопки для быстрого доступа!"""
         
         await callback.message.edit_text(help_text, reply_markup=get_main_keyboard())
-        
-    elif data == "change_sheet":
-        await callback.message.edit_text(
-            "🔗 Отправьте новую ссылку на Google таблицу:\n\n/setsheet <ссылка>",
-            reply_markup=get_main_keyboard()
-        )
         
     elif data == "main_menu":
         await callback.message.edit_text(
