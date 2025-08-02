@@ -212,13 +212,40 @@ async def status_command(message: Message):
     logger.info(f"Команда /status от пользователя {username} (ID: {user_id})")
     
     user_id_str = str(user_id)
-    if user_id_str in user_sheets:
-        sheet_id = user_sheets[user_id_str]
-        status_text = f"✅ Таблица подключена\n📊 ID таблицы: {sheet_id}\n\n📝 Используйте /track для записи данных"
-    else:
+    if user_id_str not in user_sheets:
         status_text = "❌ Таблица не подключена\n\n🔗 Используйте /setsheet <ссылка> для подключения таблицы"
+        await message.reply(status_text)
+        logger.info(f"Отправлен статус пользователю {username}")
+        return
     
-    await message.reply(status_text)
+    try:
+        sheet_id = user_sheets[user_id_str]
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+        
+        # Получаем данные из таблицы
+        if google_sheets_available and client:
+            sheet = client.open_by_key(sheet_id).sheet1
+            all_values = sheet.get_all_values()
+            
+            if len(all_values) <= 1:  # Только заголовки или пустая таблица
+                status_text = f"✅ Таблица подключена\n🔗 [Открыть таблицу]({sheet_url})\n\n📊 Записей: 0\n📝 Используйте /track для первой записи"
+            else:
+                # Подсчитываем количество записей (исключая заголовок)
+                total_records = len(all_values) - 1
+                
+                # Получаем последнюю запись
+                last_record = all_values[-1]
+                last_date = last_record[0] if last_record else "Неизвестно"
+                
+                status_text = f"✅ Таблица подключена\n🔗 [Открыть таблицу]({sheet_url})\n\n📊 Всего записей: {total_records}\n📅 Последняя запись: {last_date}\n\n📝 Используйте /track для новой записи"
+        else:
+            status_text = f"✅ Таблица подключена\n🔗 [Открыть таблицу]({sheet_url})\n\n⚠️ Google Sheets API недоступен\n📝 Используйте /track для записи данных"
+            
+    except Exception as e:
+        logger.error(f"Ошибка при получении статуса для пользователя {username}: {str(e)}")
+        status_text = f"✅ Таблица подключена\n🔗 [Открыть таблицу]({sheet_url})\n\n❌ Ошибка при чтении данных: {str(e)}\n📝 Используйте /track для записи данных"
+    
+    await message.reply(status_text, parse_mode="Markdown", disable_web_page_preview=True)
     logger.info(f"Отправлен статус пользователю {username}")
 
 # Обработчики кнопок
@@ -247,13 +274,39 @@ async def handle_callback(callback: CallbackQuery, state: FSMContext):
         
     elif data == "check_status":
         user_id_str = str(user_id)
-        if user_id_str in user_sheets:
-            sheet_id = user_sheets[user_id_str]
-            status_text = f"✅ Таблица подключена\n📊 ID таблицы: {sheet_id}\n\n📝 Используйте кнопку 'Записать данные'"
-        else:
+        if user_id_str not in user_sheets:
             status_text = "❌ Таблица не подключена\n\n🔗 Используйте /setsheet <ссылка> для подключения таблицы"
+            await callback.message.edit_text(status_text, reply_markup=get_main_keyboard())
+            return
         
-        await callback.message.edit_text(status_text, reply_markup=get_main_keyboard())
+        try:
+            sheet_id = user_sheets[user_id_str]
+            sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+            
+            # Получаем данные из таблицы
+            if google_sheets_available and client:
+                sheet = client.open_by_key(sheet_id).sheet1
+                all_values = sheet.get_all_values()
+                
+                if len(all_values) <= 1:  # Только заголовки или пустая таблица
+                    status_text = f"✅ Таблица подключена\n🔗 [Открыть таблицу]({sheet_url})\n\n📊 Записей: 0\n📝 Используйте кнопку 'Записать данные' для первой записи"
+                else:
+                    # Подсчитываем количество записей (исключая заголовок)
+                    total_records = len(all_values) - 1
+                    
+                    # Получаем последнюю запись
+                    last_record = all_values[-1]
+                    last_date = last_record[0] if last_record else "Неизвестно"
+                    
+                    status_text = f"✅ Таблица подключена\n🔗 [Открыть таблицу]({sheet_url})\n\n📊 Всего записей: {total_records}\n📅 Последняя запись: {last_date}\n\n📝 Используйте кнопку 'Записать данные' для новой записи"
+            else:
+                status_text = f"✅ Таблица подключена\n🔗 [Открыть таблицу]({sheet_url})\n\n⚠️ Google Sheets API недоступен\n📝 Используйте кнопку 'Записать данные'"
+                
+        except Exception as e:
+            logger.error(f"Ошибка при получении статуса для пользователя {username}: {str(e)}")
+            status_text = f"✅ Таблица подключена\n🔗 [Открыть таблицу]({sheet_url})\n\n❌ Ошибка при чтении данных: {str(e)}\n📝 Используйте кнопку 'Записать данные'"
+        
+        await callback.message.edit_text(status_text, reply_markup=get_main_keyboard(), parse_mode="Markdown", disable_web_page_preview=True)
         
     elif data == "show_help":
         help_text = """📚 Доступные команды:
