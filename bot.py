@@ -12,6 +12,7 @@ import datetime
 import asyncio
 import logging
 import os
+from database import db
 
 # Настройка логирования
 logging.basicConfig(
@@ -68,12 +69,8 @@ def get_track_keyboard() -> InlineKeyboardMarkup:
     ])
     return keyboard
 
-# Словарь user_id -> Google Sheet ID
-try:
-    with open("usersheets.json", "r") as f:
-        user_sheets = json.load(f)
-except:
-    user_sheets = {}
+# Словарь user_id -> Google Sheet ID (загружается из БД при старте)
+user_sheets = {}
 
 # FSM
 class Form(StatesGroup):
@@ -168,15 +165,30 @@ async def set_sheet(message: Message):
         sheet_id = url.split('/d/')[1].split('/')[0]
         logger.info(f"Извлечен ID таблицы: {sheet_id}")
         
-        user_sheets[str(user_id)] = sheet_id
-        with open("usersheets.json", "w") as f:
-            json.dump(user_sheets, f)
-        
-        logger.info(f"Таблица {sheet_id} подключена для пользователя {username}")
-        await message.reply(
-            "✅ Таблица подключена!\n\n📊 Теперь вы можете записывать данные о вашем состоянии.",
-            reply_markup=get_track_keyboard()
-        )
+        # Сохраняем в базу данных
+        try:
+            success = await db.set_user_sheet(str(user_id), sheet_id)
+            if success:
+                # Обновляем локальный словарь
+                user_sheets[str(user_id)] = sheet_id
+                
+                logger.info(f"Таблица {sheet_id} подключена для пользователя {username}")
+                await message.reply(
+                    "✅ Таблица подключена!\n\n📊 Теперь вы можете записывать данные о вашем состоянии.",
+                    reply_markup=get_track_keyboard()
+                )
+            else:
+                logger.error(f"Не удалось сохранить таблицу в БД для пользователя {username}")
+                await message.reply("❌ Ошибка при сохранении таблицы. Попробуйте еще раз.")
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении в БД: {e}")
+            # Сохраняем только в локальный словарь как fallback
+            user_sheets[str(user_id)] = sheet_id
+            logger.warning(f"Сохранено только в локальный словарь для пользователя {username}")
+            await message.reply(
+                "✅ Таблица подключена! (временное сохранение)\n\n📊 Теперь вы можете записывать данные о вашем состоянии.",
+                reply_markup=get_track_keyboard()
+            )
     except IndexError:
         logger.warning(f"Пользователь {username} не указал ссылку на таблицу")
         await message.reply("Пожалуйста, укажите ссылку на таблицу: /setsheet <ссылка>")
@@ -457,6 +469,26 @@ async def main():
     logger.info("🚀 Запуск бота...")
     
     try:
+        # Инициализируем базу данных
+        logger.info("🗄️ Инициализация базы данных...")
+        try:
+            await db.init()
+            logger.info("✅ База данных инициализирована успешно")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при инициализации БД: {e}")
+            logger.warning("⚠️ Продолжаем работу без базы данных")
+        
+        # Загружаем данные пользователей из БД
+        logger.info("📥 Загрузка данных пользователей из БД...")
+        global user_sheets
+        try:
+            user_sheets = await db.get_all_user_sheets()
+            logger.info(f"✅ Загружено {len(user_sheets)} привязок пользователей к таблицам")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при загрузке данных из БД: {e}")
+            user_sheets = {}
+            logger.warning("⚠️ Используем пустой словарь пользователей")
+        
         # Удаляем webhook перед запуском polling
         logger.info("📡 Удаление webhook...")
         await bot.delete_webhook(drop_pending_updates=True)

@@ -32,6 +32,11 @@ usersheets.json
 .env.local
 google_creds_for_deploy.txt
 
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
 # IDE
 .vscode/
 .idea/
