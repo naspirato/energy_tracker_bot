@@ -42,55 +42,64 @@ dp.include_router(router)
 
 logger.info("Бот инициализирован успешно")
 
-# Функция для создания Google таблицы
-async def create_user_sheet(user_id: str, username: str) -> str:
-    """Создает новую Google таблицу для пользователя"""
+# Функция для инициализации шаблона таблицы
+async def initialize_table_template(sheet_id: str) -> bool:
+    """Инициализирует таблицу с базовым шаблоном"""
     try:
-        # Создаем название таблицы с именем пользователя и датой
-        from datetime import datetime
-        current_date = datetime.now().strftime("%Y-%m-%d")
-        sheet_name = f"Energy Tracker - {username} ({current_date})"
+        sheet = client.open_by_key(sheet_id).sheet1
         
-        # Создаем новую таблицу
-        sheet = client.create(sheet_name)
-        sheet_id = sheet.id
+        # Очищаем таблицу
+        sheet.clear()
         
-        # Настраиваем заголовки
-        worksheet = sheet.sheet1
+        # Добавляем базовые заголовки
         headers = [
-            "Дата и время",
-            "Усталость (0-10)",
-            "Настроение (0-10)", 
-            "Сон",
-            "Физическая нагрузка (0-10)",
-            "Умственная нагрузка (0-10)",
-            "Симптомы",
-            "Заметки"
+            "Время",
+            "Настроение (0-10)",
+            "Комментарий"
         ]
-        worksheet.append_row(headers)
+        sheet.append_row(headers)
         
-        # Форматируем заголовки (жирный шрифт)
-        worksheet.format('A1:H1', {
+        # Форматируем заголовки
+        sheet.format('A1:C1', {
             'textFormat': {'bold': True},
             'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}
         })
         
         # Настраиваем ширину колонок
-        worksheet.set_column_width(1, 150)  # Дата и время
-        worksheet.set_column_width(2, 120)  # Усталость
-        worksheet.set_column_width(3, 120)  # Настроение
-        worksheet.set_column_width(4, 100)  # Сон
-        worksheet.set_column_width(5, 150)  # Физическая нагрузка
-        worksheet.set_column_width(6, 150)  # Умственная нагрузка
-        worksheet.set_column_width(7, 200)  # Симптомы
-        worksheet.set_column_width(8, 250)  # Заметки
+        sheet.set_column_width(1, 150)  # Время
+        sheet.set_column_width(2, 150)  # Настроение
+        sheet.set_column_width(3, 300)  # Комментарий
         
-        logger.info(f"✅ Создана таблица {sheet_id} для пользователя {username}")
-        return sheet_id
+        logger.info(f"✅ Шаблон инициализирован для таблицы {sheet_id}")
+        return True
         
     except Exception as e:
-        logger.error(f"❌ Ошибка при создании таблицы для пользователя {username}: {e}")
-        raise
+        logger.error(f"❌ Ошибка при инициализации шаблона для таблицы {sheet_id}: {e}")
+        return False
+
+# Функция для проверки структуры таблицы
+async def check_table_structure(sheet_id: str) -> bool:
+    """Проверяет, подходит ли структура таблицы для работы с ботом"""
+    try:
+        sheet = client.open_by_key(sheet_id).sheet1
+        all_values = sheet.get_all_values()
+        
+        if not all_values or len(all_values) == 0:
+            return False
+        
+        # Проверяем, есть ли хотя бы один столбец
+        headers = all_values[0]
+        if len(headers) < 1:
+            return False
+        
+        # Проверяем, есть ли столбец с временем/датой
+        has_time_column = any('время' in header.lower() or 'дата' in header.lower() or 'time' in header.lower() for header in headers)
+        
+        return has_time_column
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при проверке структуры таблицы {sheet_id}: {e}")
+        return False
 
 async def add_column_to_sheet(sheet_id: str, column_name: str) -> bool:
     """Добавляет новый столбец в таблицу"""
@@ -130,11 +139,10 @@ def get_main_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📈 Статус", callback_data="check_status")
         ],
         [
-            InlineKeyboardButton(text="➕ Создать таблицу", callback_data="create_sheet"),
-            InlineKeyboardButton(text="🔗 Подключить таблицу", callback_data="connect_sheet")
+            InlineKeyboardButton(text="🔗 Подключить таблицу", callback_data="connect_sheet"),
+            InlineKeyboardButton(text="📋 Измерения", callback_data="manage_measurements")
         ],
         [
-            InlineKeyboardButton(text="📋 Измерения", callback_data="manage_measurements"),
             InlineKeyboardButton(text="❓ Помощь", callback_data="show_help")
         ]
     ])
@@ -165,6 +173,7 @@ class Form(StatesGroup):
     symptoms = State()
     notes = State()
     custom_measurement = State()  # Для пользовательских измерений
+    template_choice = State()  # Для выбора инициализации шаблона
 
 # FSM для создания измерений
 class MeasurementForm(StatesGroup):
@@ -211,11 +220,9 @@ async def start(message: Message):
 📋 Что я умею:
 • Записывать данные о вашем состоянии в Google таблицы
 • Отслеживать усталость, настроение и качество сна
-• Создавать новые таблицы автоматически
+• Настраивать пользовательские измерения
 
-🚀 Выберите действие:
-➕ Создать новую таблицу (рекомендуется)
-🔗 Подключить существующую таблицу"""
+🚀 Начните с подключения Google таблицы!"""
     
     await message.reply(response, reply_markup=get_main_keyboard())
     logger.info(f"Отправлен ответ пользователю {username}")
@@ -289,63 +296,10 @@ async def show_measurements(message: Message):
     await message.reply(measurements_text)
     logger.info(f"Показаны измерения пользователю {username}")
 
-@router.message(Command("createsheet"))
-async def create_sheet(message: Message):
-    """Создает новую Google таблицу для пользователя"""
-    user_id = message.from_user.id
-    username = message.from_user.username or "Unknown"
-    logger.info(f"Команда /createsheet от пользователя {username} (ID: {user_id})")
-    
-    if not google_sheets_available:
-        logger.warning(f"Google Sheets недоступен для пользователя {username}")
-        await message.reply("Google Sheets не настроен. Добавьте файл creds.json для работы с таблицами.")
-        return
-    
-    try:
-        # Создаем новую таблицу
-        await message.reply("🔄 Создаю новую таблицу для вас...")
-        sheet_id = await create_user_sheet(str(user_id), username)
-        
-        # Сохраняем в базу данных
-        try:
-            success = await db.set_user_sheet(str(user_id), sheet_id)
-            if success:
-                # Обновляем локальный словарь
-                user_sheets[str(user_id)] = sheet_id
-                
-                sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-                logger.info(f"Таблица {sheet_id} создана и подключена для пользователя {username}")
-                await message.reply(
-                    f"✅ Таблица создана и подключена!\n\n"
-                    f"🔗 [Открыть таблицу]({sheet_url})\n\n"
-                    f"📊 Теперь вы можете записывать данные о вашем состоянии.",
-                    reply_markup=get_track_keyboard(),
-                    parse_mode="Markdown",
-                    disable_web_page_preview=True
-                )
-            else:
-                logger.error(f"Не удалось сохранить таблицу в БД для пользователя {username}")
-                await message.reply("❌ Ошибка при сохранении таблицы. Попробуйте еще раз.")
-        except Exception as e:
-            logger.error(f"Ошибка при сохранении в БД: {e}")
-            # Сохраняем только в локальный словарь как fallback
-            user_sheets[str(user_id)] = sheet_id
-            sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-            logger.warning(f"Сохранено только в локальный словарь для пользователя {username}")
-            await message.reply(
-                f"✅ Таблица создана! (временное сохранение)\n\n"
-                f"🔗 [Открыть таблицу]({sheet_url})\n\n"
-                f"📊 Теперь вы можете записывать данные о вашем состоянии.",
-                reply_markup=get_track_keyboard(),
-                parse_mode="Markdown",
-                disable_web_page_preview=True
-            )
-    except Exception as e:
-        logger.error(f"Ошибка при создании таблицы для пользователя {username}: {str(e)}")
-        await message.reply(f"❌ Ошибка при создании таблицы: {str(e)}")
+
 
 @router.message(Command("setsheet"))
-async def set_sheet(message: Message):
+async def set_sheet(message: Message, state: FSMContext):
     user_id = message.from_user.id
     username = message.from_user.username or "Unknown"
     logger.info(f"Команда /setsheet от пользователя {username} (ID: {user_id})")
@@ -360,36 +314,67 @@ async def set_sheet(message: Message):
         sheet_id = url.split('/d/')[1].split('/')[0]
         logger.info(f"Извлечен ID таблицы: {sheet_id}")
         
-        # Сохраняем в базу данных
-        try:
-            success = await db.set_user_sheet(str(user_id), sheet_id)
-            if success:
-                # Обновляем локальный словарь
-                user_sheets[str(user_id)] = sheet_id
-                
-                logger.info(f"Таблица {sheet_id} подключена для пользователя {username}")
-                await message.reply(
-                    "✅ Таблица подключена!\n\n📊 Теперь вы можете записывать данные о вашем состоянии.",
-                    reply_markup=get_track_keyboard()
-                )
-            else:
-                logger.error(f"Не удалось сохранить таблицу в БД для пользователя {username}")
-                await message.reply("❌ Ошибка при сохранении таблицы. Попробуйте еще раз.")
-        except Exception as e:
-            logger.error(f"Ошибка при сохранении в БД: {e}")
-            # Сохраняем только в локальный словарь как fallback
-            user_sheets[str(user_id)] = sheet_id
-            logger.warning(f"Сохранено только в локальный словарь для пользователя {username}")
+        # Проверяем структуру таблицы
+        structure_ok = await check_table_structure(sheet_id)
+        
+        if not structure_ok:
+            # Предлагаем инициализировать шаблон
             await message.reply(
-                "✅ Таблица подключена! (временное сохранение)\n\n📊 Теперь вы можете записывать данные о вашем состоянии.",
-                reply_markup=get_track_keyboard()
+                "📋 Структура таблицы не подходит для работы с ботом.\n\n"
+                "Хотите инициализировать шаблон?\n"
+                "Это создаст столбцы: Время, Настроение (0-10), Комментарий\n\n"
+                "Отправьте 'да' для инициализации или 'нет' для отмены:"
             )
+            # Сохраняем ID таблицы во временное состояние
+            await state.update_data(temp_sheet_id=sheet_id)
+            await state.set_state(Form.template_choice)
+            return
+        
+        # Структура подходит, сохраняем таблицу
+        await save_table_connection(message, sheet_id, user_id, username)
+        
     except IndexError:
         logger.warning(f"Пользователь {username} не указал ссылку на таблицу")
         await message.reply("Пожалуйста, укажите ссылку на таблицу: /setsheet <ссылка>")
     except Exception as e:
         logger.error(f"Ошибка при подключении таблицы для пользователя {username}: {str(e)}")
         await message.reply(f"Ошибка при подключении таблицы: {str(e)}")
+
+async def save_table_connection(message: Message, sheet_id: str, user_id: int, username: str):
+    """Сохраняет подключение таблицы"""
+    try:
+        success = await db.set_user_sheet(str(user_id), sheet_id)
+        if success:
+            # Обновляем локальный словарь
+            user_sheets[str(user_id)] = sheet_id
+            
+            sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+            logger.info(f"Таблица {sheet_id} подключена для пользователя {username}")
+            await message.reply(
+                f"✅ Таблица подключена!\n\n"
+                f"🔗 [Открыть таблицу]({sheet_url})\n\n"
+                f"📊 Теперь вы можете записывать данные о вашем состоянии.",
+                reply_markup=get_track_keyboard(),
+                parse_mode="Markdown",
+                disable_web_page_preview=True
+            )
+        else:
+            logger.error(f"Не удалось сохранить таблицу в БД для пользователя {username}")
+            await message.reply("❌ Ошибка при сохранении таблицы. Попробуйте еще раз.")
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении в БД: {e}")
+        # Сохраняем только в локальный словарь как fallback
+        user_sheets[str(user_id)] = sheet_id
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+        logger.warning(f"Сохранено только в локальный словарь для пользователя {username}")
+        await message.reply(
+            f"✅ Таблица подключена! (временное сохранение)\n\n"
+            f"🔗 [Открыть таблицу]({sheet_url})\n\n"
+            f"📊 Теперь вы можете записывать данные о вашем состоянии.",
+            reply_markup=get_track_keyboard(),
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
 
 @router.message(Command("track"))
 async def track(message: Message, state: FSMContext):
@@ -408,9 +393,21 @@ async def track(message: Message, state: FSMContext):
         await message.reply("Сначала отправь ссылку на таблицу через /setsheet")
         return
     
-    logger.info(f"Начинаем отслеживание для пользователя {username}")
-    await message.reply("Усталость (0–10)?")
-    await state.set_state(Form.fatigue)
+    # Проверяем, есть ли пользовательские измерения
+    custom_measurements = await db.get_custom_measurements(user_id_str)
+    
+    if not custom_measurements:
+        await message.reply(
+            "📋 У вас нет настроенных измерений.\n\n"
+            "💡 Используйте /addmeasurement для добавления измерений, "
+            "или /measurements для просмотра существующих."
+        )
+        return
+    
+    # Начинаем сбор данных с первого измерения
+    await state.update_data(custom_measurements=custom_measurements, current_measurement_index=0)
+    await ask_next_custom_measurement(message, state)
+    logger.info(f"Начинаем отслеживание для пользователя {username} с {len(custom_measurements)} измерениями")
 
 @router.message(Command("status"))
 async def status_command(message: Message):
@@ -515,41 +512,6 @@ async def handle_callback(callback: CallbackQuery, state: FSMContext):
         
         await callback.message.edit_text(status_text, reply_markup=get_main_keyboard(), parse_mode="Markdown", disable_web_page_preview=True)
         
-    elif data == "create_sheet":
-        if not google_sheets_available:
-            await callback.answer("❌ Google Sheets недоступен!", show_alert=True)
-            return
-        
-        await callback.answer("🔄 Создаю таблицу...")
-        try:
-            sheet_id = await create_user_sheet(str(user_id), username)
-            
-            # Сохраняем в базу данных
-            success = await db.set_user_sheet(str(user_id), sheet_id)
-            if success:
-                user_sheets[str(user_id)] = sheet_id
-                sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-                
-                await callback.message.edit_text(
-                    f"✅ Таблица создана и подключена!\n\n"
-                    f"🔗 [Открыть таблицу]({sheet_url})\n\n"
-                    f"📊 Теперь вы можете записывать данные о вашем состоянии.",
-                    reply_markup=get_main_keyboard(),
-                    parse_mode="Markdown",
-                    disable_web_page_preview=True
-                )
-            else:
-                await callback.message.edit_text(
-                    "❌ Ошибка при сохранении таблицы. Попробуйте еще раз.",
-                    reply_markup=get_main_keyboard()
-                )
-        except Exception as e:
-            logger.error(f"Ошибка при создании таблицы: {e}")
-            await callback.message.edit_text(
-                f"❌ Ошибка при создании таблицы: {str(e)}",
-                reply_markup=get_main_keyboard()
-            )
-    
     elif data == "connect_sheet":
         await callback.message.edit_text(
             "🔗 Отправьте ссылку на Google таблицу:\n\n"
@@ -586,8 +548,7 @@ async def handle_callback(callback: CallbackQuery, state: FSMContext):
     elif data == "show_help":
         help_text = """📚 Доступные команды:
 
-➕ /createsheet - Создать новую Google таблицу (рекомендуется)
-🔗 /setsheet <ссылка> - Подключить существующую таблицу
+🔗 /setsheet <ссылка> - Подключить Google таблицу
 📊 /track - Начать запись данных о состоянии
 📈 /status - Проверить подключенную таблицу
 ➕ /addmeasurement - Добавить новое измерение
@@ -771,7 +732,8 @@ async def save_complete_data(message: Message, state: FSMContext):
     data = await state.get_data()
     user_id_str = str(user_id)
     
-    logger.info(f"Данные для записи от {username}: fatigue={data.get('fatigue')}, mood={data.get('mood')}, sleep={data.get('sleep')}, physical_load={data.get('physical_load')}, mental_load={data.get('mental_load')}, symptoms={data.get('symptoms')}, notes={data.get('notes')}, custom_values={data.get('custom_values', {})}")
+    custom_values = data.get('custom_values', {})
+    logger.info(f"Данные для записи от {username}: custom_values={custom_values}")
 
     if user_id_str not in user_sheets:
         logger.error(f"Пользователь {username} не подключил таблицу")
@@ -783,25 +745,23 @@ async def save_complete_data(message: Message, state: FSMContext):
         sheet = client.open_by_key(user_sheets[user_id_str]).sheet1
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         
-        # Базовые данные
-        row_data = [
-            now, 
-            data.get('fatigue', ''), 
-            data.get('mood', ''), 
-            data.get('sleep', ''),
-            data.get('physical_load', ''),
-            data.get('mental_load', ''),
-            data.get('symptoms', ''),
-            data.get('notes', '')
-        ]
+        # Получаем заголовки таблицы
+        all_values = sheet.get_all_values()
+        if not all_values:
+            await message.reply("❌ Таблица пустая. Проверьте структуру таблицы.")
+            return
         
-        # Добавляем пользовательские измерения
-        custom_measurements = data.get('custom_measurements', [])
-        custom_values = data.get('custom_values', {})
+        headers = all_values[0]
+        row_data = [now]  # Начинаем с времени
         
-        for measurement in custom_measurements:
-            measurement_name = measurement['name']
-            value = custom_values.get(measurement_name, '')
+        # Добавляем значения в том же порядке, что и заголовки (кроме времени)
+        for i, header in enumerate(headers[1:], 1):
+            # Ищем соответствующее измерение
+            value = ''
+            for measurement_name, measurement_value in custom_values.items():
+                if measurement_name.lower() in header.lower() or header.lower() in measurement_name.lower():
+                    value = measurement_value
+                    break
             row_data.append(value)
         
         logger.info(f"Записываем строку: {row_data}")
@@ -820,6 +780,49 @@ async def save_complete_data(message: Message, state: FSMContext):
     
     await state.clear()
     logger.info(f"Состояние очищено для пользователя {username}")
+
+# Обработчик для выбора инициализации шаблона
+@router.message(Form.template_choice)
+async def handle_template_choice(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    username = message.from_user.username or "Unknown"
+    choice = message.text.lower().strip()
+    
+    data = await state.get_data()
+    temp_sheet_id = data.get('temp_sheet_id')
+    
+    if choice in ['да', 'yes', 'y', '1']:
+        # Инициализируем шаблон
+        success = await initialize_table_template(temp_sheet_id)
+        if success:
+            await message.reply(
+                "✅ Шаблон инициализирован!\n\n"
+                "📋 Созданы столбцы:\n"
+                "• Время\n"
+                "• Настроение (0-10)\n"
+                "• Комментарий\n\n"
+                "💡 Теперь вы можете добавлять свои измерения через /addmeasurement"
+            )
+            # Сохраняем подключение таблицы
+            await save_table_connection(message, temp_sheet_id, user_id, username)
+        else:
+            await message.reply(
+                "❌ Ошибка при инициализации шаблона.\n"
+                "Попробуйте еще раз или обратитесь к администратору."
+            )
+    elif choice in ['нет', 'no', 'n', '0']:
+        await message.reply(
+            "❌ Инициализация отменена.\n\n"
+            "💡 Убедитесь, что ваша таблица содержит столбец с временем/датой."
+        )
+    else:
+        await message.reply(
+            "❌ Пожалуйста, ответьте 'да' или 'нет':"
+        )
+        return
+    
+    await state.clear()
+    logger.info(f"Обработан выбор шаблона для пользователя {username}: {choice}")
 
 # Обработчики для создания измерений
 @router.message(MeasurementForm.measurement_name)
