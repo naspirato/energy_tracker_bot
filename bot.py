@@ -42,6 +42,107 @@ dp.include_router(router)
 
 logger.info("Бот инициализирован успешно")
 
+# Функция для получения измерений из таблицы
+async def get_measurements_from_sheet(sheet_id: str) -> list:
+    """Получает измерения из таблицы Google Sheets"""
+    try:
+        sheet = client.open_by_key(sheet_id).sheet1
+        all_values = sheet.get_all_values()
+        
+        if not all_values or len(all_values) == 0:
+            return []
+        
+        # Получаем заголовки (первая строка)
+        headers = all_values[0]
+        measurements = []
+        
+        # Пропускаем первый столбец (время)
+        for i, header in enumerate(headers[1:], 1):
+            if header.strip():  # Пропускаем пустые заголовки
+                # Определяем тип измерения по умолчанию
+                measurement_type = 'text'  # По умолчанию текстовый
+                max_value = 10  # По умолчанию 10
+                
+                # Проверяем лист метаданных
+                try:
+                    metadata_sheet = client.open_by_key(sheet_id).worksheet("Метаданные")
+                    metadata_values = metadata_sheet.get_all_values()
+                    
+                    # Ищем информацию о текущем измерении
+                    for row in metadata_values:
+                        if len(row) >= 3 and row[0] == header:
+                            measurement_type = row[1] if row[1] in ['numeric', 'text'] else 'text'
+                            try:
+                                max_value = int(row[2]) if row[2] else 10
+                            except ValueError:
+                                max_value = 10
+                            break
+                except:
+                    # Если лист метаданных не существует, используем значения по умолчанию
+                    pass
+                
+                measurements.append({
+                    'name': header,
+                    'type': measurement_type,
+                    'max_value': max_value,
+                    'column_index': i
+                })
+        
+        return measurements
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при получении измерений из таблицы {sheet_id}: {e}")
+        return []
+
+# Функция для добавления измерения в таблицу
+async def add_measurement_to_sheet(sheet_id: str, measurement_name: str, measurement_type: str = 'text', max_value: int = 10) -> bool:
+    """Добавляет новое измерение в таблицу Google Sheets"""
+    try:
+        sheet = client.open_by_key(sheet_id).sheet1
+        all_values = sheet.get_all_values()
+        
+        if not all_values:
+            return False
+        
+        # Получаем количество столбцов
+        num_columns = len(all_values[0])
+        
+        # Добавляем заголовок в последний столбец первой строки
+        last_column_letter = chr(ord('A') + num_columns)
+        
+        # Используем правильный формат для обновления ячейки
+        sheet.update_cell(1, num_columns + 1, measurement_name)
+        
+        # Форматируем заголовок
+        sheet.format(f'{last_column_letter}1', {
+            'textFormat': {'bold': True},
+            'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}
+        })
+        
+        # Добавляем информацию в лист метаданных
+        try:
+            metadata_sheet = client.open_by_key(sheet_id).worksheet("Метаданные")
+        except:
+            # Создаем лист метаданных если его нет
+            spreadsheet = client.open_by_key(sheet_id)
+            metadata_sheet = spreadsheet.add_worksheet(title="Метаданные", rows=100, cols=10)
+            # Добавляем заголовки
+            metadata_sheet.append_row(["Измерение", "Тип", "Макс. значение", "Описание"])
+            metadata_sheet.format('A1:D1', {
+                'textFormat': {'bold': True},
+                'backgroundColor': {'red': 0.8, 'green': 0.8, 'blue': 0.8}
+            })
+        
+        # Добавляем информацию об измерении
+        metadata_sheet.append_row([measurement_name, measurement_type, str(max_value), f"Добавлено автоматически"])
+        
+        logger.info(f"✅ Добавлено измерение '{measurement_name}' в таблицу {sheet_id}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при добавлении измерения в таблицу {sheet_id}: {e}")
+        return False
+
 # Функция для инициализации шаблона таблицы
 async def initialize_table_template(sheet_id: str) -> bool:
     """Инициализирует таблицу с базовым шаблоном"""
@@ -146,35 +247,6 @@ async def check_table_structure(sheet_id: str) -> bool:
         
     except Exception as e:
         logger.error(f"❌ Ошибка при проверке структуры таблицы {sheet_id}: {e}")
-        return False
-
-async def add_column_to_sheet(sheet_id: str, column_name: str) -> bool:
-    """Добавляет новый столбец в таблицу"""
-    try:
-        sheet = client.open_by_key(sheet_id).sheet1
-        all_values = sheet.get_all_values()
-        
-        if not all_values:
-            return False
-        
-        # Получаем количество столбцов
-        num_columns = len(all_values[0])
-        
-        # Добавляем заголовок в последний столбец первой строки
-        last_column_letter = chr(ord('A') + num_columns)
-        sheet.update(f'{last_column_letter}1', column_name)
-        
-        # Форматируем заголовок
-        sheet.format(f'{last_column_letter}1', {
-            'textFormat': {'bold': True},
-            'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}
-        })
-        
-        logger.info(f"✅ Добавлен столбец '{column_name}' в таблицу {sheet_id}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка при добавлении столбца в таблицу {sheet_id}: {e}")
         return False
 
 # Функции для создания кнопок
@@ -326,33 +398,49 @@ async def help_command(message: Message):
 
 @router.message(Command("measurements"))
 async def show_measurements(message: Message):
-    """Показывает все пользовательские измерения"""
+    """Показывает все измерения из таблицы"""
     user_id = message.from_user.id
     username = message.from_user.username or "Unknown"
     logger.info(f"Команда /measurements от пользователя {username} (ID: {user_id})")
     
     user_id_str = str(user_id)
-    measurements = await db.get_custom_measurements(user_id_str)
-    
-    if not measurements:
+    if user_id_str not in user_sheets:
         await message.reply(
-            "📋 У вас пока нет пользовательских измерений.\n\n"
-            "💡 Нажмите 'Добавить измерение' для создания нового.",
-            reply_markup=get_measurements_keyboard()
+            "❌ Таблица не подключена\n\n🔗 Используйте /setsheet <ссылка> для подключения таблицы",
+            reply_markup=get_main_keyboard()
         )
         return
     
-    measurements_text = "📋 Ваши измерения:\n\n"
-    for i, measurement in enumerate(measurements, 1):
-        if measurement['type'] == 'numeric':
-            measurements_text += f"{i}. {measurement['name']} (0-{measurement['max_value']})\n"
-        else:
-            measurements_text += f"{i}. {measurement['name']} (текст)\n"
-    
-    measurements_text += "\n💡 Нажмите 'Добавить измерение' для создания нового"
-    
-    await message.reply(measurements_text, reply_markup=get_measurements_keyboard())
-    logger.info(f"Показаны измерения пользователю {username}")
+    try:
+        sheet_id = user_sheets[user_id_str]
+        measurements = await get_measurements_from_sheet(sheet_id)
+        
+        if not measurements:
+            await message.reply(
+                "📋 В таблице пока нет измерений.\n\n"
+                "💡 Нажмите 'Добавить измерение' для создания нового.",
+                reply_markup=get_measurements_keyboard()
+            )
+            return
+        
+        measurements_text = "📋 Измерения в таблице:\n\n"
+        for i, measurement in enumerate(measurements, 1):
+            if measurement['type'] == 'numeric':
+                measurements_text += f"{i}. {measurement['name']} (0-{measurement['max_value']})\n"
+            else:
+                measurements_text += f"{i}. {measurement['name']} (текст)\n"
+        
+        measurements_text += "\n💡 Нажмите 'Добавить измерение' для создания нового"
+        
+        await message.reply(measurements_text, reply_markup=get_measurements_keyboard())
+        logger.info(f"Показаны измерения пользователю {username}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении измерений для пользователя {username}: {e}")
+        await message.reply(
+            "❌ Ошибка при получении измерений из таблицы.",
+            reply_markup=get_main_keyboard()
+        )
 
 
 
@@ -491,12 +579,13 @@ async def track(message: Message, state: FSMContext):
         await message.reply("Сначала отправь ссылку на таблицу через /setsheet")
         return
     
-    # Проверяем, есть ли пользовательские измерения
-    custom_measurements = await db.get_custom_measurements(user_id_str)
+    # Проверяем, есть ли измерения в таблице
+    sheet_id = user_sheets[user_id_str]
+    custom_measurements = await get_measurements_from_sheet(sheet_id)
     
     if not custom_measurements:
         await message.reply(
-            "📋 У вас нет настроенных измерений.\n\n"
+            "📋 В таблице нет измерений.\n\n"
             "💡 Используйте /addmeasurement для добавления измерений, "
             "или /measurements для просмотра существующих."
         )
@@ -552,7 +641,7 @@ async def status_command(message: Message):
                 
                 # Пользовательские измерения
                 user_id_str = str(user_id)
-                custom_measurements = await db.get_custom_measurements(user_id_str)
+                custom_measurements = await get_measurements_from_sheet(sheet_id)
                 
                 if custom_measurements:
                     status_text += "\n\n📊 Пользовательские:"
@@ -637,7 +726,7 @@ async def handle_callback(callback: CallbackQuery, state: FSMContext):
                 
                 # Пользовательские измерения
                 user_id_str = str(user_id)
-                custom_measurements = await db.get_custom_measurements(user_id_str)
+                custom_measurements = await get_measurements_from_sheet(sheet_id)
                 
                 if custom_measurements:
                     status_text += "\n\n📊 Пользовательские:"
@@ -668,27 +757,42 @@ async def handle_callback(callback: CallbackQuery, state: FSMContext):
     
     elif data == "manage_measurements":
         user_id_str = str(user_id)
-        measurements = await db.get_custom_measurements(user_id_str)
-        
-        if not measurements:
+        if user_id_str not in user_sheets:
             await callback.message.edit_text(
-                "📋 У вас пока нет пользовательских измерений.\n\n"
-                "💡 Нажмите 'Добавить измерение' для создания нового.",
-                reply_markup=get_measurements_keyboard()
+                "❌ Таблица не подключена\n\n🔗 Используйте /setsheet <ссылка> для подключения таблицы",
+                reply_markup=get_main_keyboard()
             )
-        else:
-            measurements_text = "📋 Ваши измерения:\n\n"
-            for i, measurement in enumerate(measurements, 1):
-                if measurement['type'] == 'numeric':
-                    measurements_text += f"{i}. {measurement['name']} (0-{measurement['max_value']})\n"
-                else:
-                    measurements_text += f"{i}. {measurement['name']} (текст)\n"
+            return
+        
+        try:
+            sheet_id = user_sheets[user_id_str]
+            measurements = await get_measurements_from_sheet(sheet_id)
             
-            measurements_text += "\n💡 Нажмите 'Добавить измерение' для создания нового"
-            
+            if not measurements:
+                await callback.message.edit_text(
+                    "📋 В таблице пока нет измерений.\n\n"
+                    "💡 Нажмите 'Добавить измерение' для создания нового.",
+                    reply_markup=get_measurements_keyboard()
+                )
+            else:
+                measurements_text = "📋 Измерения в таблице:\n\n"
+                for i, measurement in enumerate(measurements, 1):
+                    if measurement['type'] == 'numeric':
+                        measurements_text += f"{i}. {measurement['name']} (0-{measurement['max_value']})\n"
+                    else:
+                        measurements_text += f"{i}. {measurement['name']} (текст)\n"
+                
+                measurements_text += "\n💡 Нажмите 'Добавить измерение' для создания нового"
+                
+                await callback.message.edit_text(
+                    measurements_text,
+                    reply_markup=get_measurements_keyboard()
+                )
+        except Exception as e:
+            logger.error(f"Ошибка при получении измерений для пользователя {username}: {e}")
             await callback.message.edit_text(
-                measurements_text,
-                reply_markup=get_measurements_keyboard()
+                "❌ Ошибка при получении измерений из таблицы.",
+                reply_markup=get_main_keyboard()
             )
     
     elif data == "init_template_yes":
@@ -884,16 +988,22 @@ async def get_notes(message: Message, state: FSMContext):
     await state.update_data(notes=notes)
     user_id_str = str(user_id)
     
-    # Проверяем, есть ли пользовательские измерения
-    custom_measurements = await db.get_custom_measurements(user_id_str)
-    
-    if custom_measurements:
-        # Есть пользовательские измерения, начинаем их сбор
-        await state.update_data(custom_measurements=custom_measurements, current_measurement_index=0)
-        await ask_next_custom_measurement(message, state)
+    # Проверяем, есть ли измерения в таблице
+    if user_id_str in user_sheets:
+        sheet_id = user_sheets[user_id_str]
+        custom_measurements = await get_measurements_from_sheet(sheet_id)
+        
+        if custom_measurements:
+            # Есть измерения в таблице, начинаем их сбор
+            await state.update_data(custom_measurements=custom_measurements, current_measurement_index=0)
+            await ask_next_custom_measurement(message, state)
+        else:
+            # Нет измерений в таблице, записываем стандартные данные
+            await save_complete_data(message, state)
     else:
-        # Нет пользовательских измерений, записываем стандартные данные
-        await save_complete_data(message, state)
+        # Таблица не подключена
+        await message.reply("❌ Таблица не подключена. Сначала подключите таблицу.")
+        await state.clear()
 
 async def ask_next_custom_measurement(message: Message, state: FSMContext):
     """Спрашивает следующее пользовательское измерение"""
@@ -1105,7 +1215,7 @@ async def get_max_value(message: Message, state: FSMContext):
     logger.info(f"Получено максимальное значение от {username}: {max_value}")
 
 async def save_measurement(message: Message, state: FSMContext, data: dict):
-    """Сохраняет новое измерение"""
+    """Сохраняет новое измерение в таблицу"""
     user_id = message.from_user.id
     username = message.from_user.username or "Unknown"
     user_id_str = str(user_id)
@@ -1114,37 +1224,28 @@ async def save_measurement(message: Message, state: FSMContext, data: dict):
     measurement_type = data.get('measurement_type')
     max_value = data.get('max_value', 10)
     
-    # Сохраняем в базу данных
-    success = await db.add_custom_measurement(
-        user_id_str, 
-        measurement_name, 
-        measurement_type, 
-        0, 
-        max_value
-    )
+    if user_id_str not in user_sheets:
+        await message.reply(
+            "❌ Таблица не подключена. Сначала подключите таблицу.",
+            reply_markup=get_measurements_keyboard()
+        )
+        return
+    
+    # Добавляем измерение в таблицу
+    sheet_id = user_sheets[user_id_str]
+    success = await add_measurement_to_sheet(sheet_id, measurement_name, measurement_type, max_value)
     
     if success:
-        # Добавляем столбец в таблицу
-        sheet_id = user_sheets[user_id_str]
-        column_added = await add_column_to_sheet(sheet_id, measurement_name)
-        
-        if column_added:
-            await message.reply(
-                f"✅ Измерение '{measurement_name}' добавлено!\n\n"
-                f"📊 Тип: {'Цифровой (0-' + str(max_value) + ')' if measurement_type == 'numeric' else 'Текстовый'}\n"
-                f"📝 Столбец добавлен в таблицу\n\n"
-                f"💡 Теперь при записи данных бот спросит это значение.",
-                reply_markup=get_measurements_keyboard()
-            )
-        else:
-            await message.reply(
-                f"✅ Измерение '{measurement_name}' добавлено в базу!\n\n"
-                f"⚠️ Не удалось добавить столбец в таблицу. Попробуйте еще раз.",
-                reply_markup=get_measurements_keyboard()
-            )
+        await message.reply(
+            f"✅ Измерение '{measurement_name}' добавлено в таблицу!\n\n"
+            f"📊 Тип: {'Цифровой (0-' + str(max_value) + ')' if measurement_type == 'numeric' else 'Текстовый'}\n"
+            f"📝 Столбец добавлен в таблицу\n\n"
+            f"💡 Теперь при записи данных бот спросит это значение.",
+            reply_markup=get_measurements_keyboard()
+        )
     else:
         await message.reply(
-            "❌ Ошибка при сохранении измерения. Попробуйте еще раз.",
+            "❌ Ошибка при добавлении измерения в таблицу. Попробуйте еще раз.",
             reply_markup=get_measurements_keyboard()
         )
     
@@ -1152,51 +1253,35 @@ async def save_measurement(message: Message, state: FSMContext, data: dict):
     logger.info(f"Измерение сохранено для пользователя {username}: {measurement_name}")
 
 async def save_measurement_callback(callback: CallbackQuery, data: dict, user_id: int, username: str):
-    """Сохраняет новое измерение через callback"""
+    """Сохраняет новое измерение в таблицу через callback"""
     user_id_str = str(user_id)
     
     measurement_name = data.get('measurement_name')
     measurement_type = data.get('measurement_type')
     max_value = data.get('max_value', 10)
     
-    # Сохраняем в базу данных
-    success = await db.add_custom_measurement(
-        user_id_str, 
-        measurement_name, 
-        measurement_type, 
-        0, 
-        max_value
-    )
+    if user_id_str not in user_sheets:
+        await callback.message.edit_text(
+            "❌ Таблица не подключена. Сначала подключите таблицу.",
+            reply_markup=get_measurements_keyboard()
+        )
+        return
+    
+    # Добавляем измерение в таблицу
+    sheet_id = user_sheets[user_id_str]
+    success = await add_measurement_to_sheet(sheet_id, measurement_name, measurement_type, max_value)
     
     if success:
-        # Добавляем столбец в таблицу
-        if user_id_str in user_sheets:
-            sheet_id = user_sheets[user_id_str]
-            column_added = await add_column_to_sheet(sheet_id, measurement_name)
-            
-            if column_added:
-                await callback.message.edit_text(
-                    f"✅ Измерение '{measurement_name}' добавлено!\n\n"
-                    f"📊 Тип: {'Цифровой (0-' + str(max_value) + ')' if measurement_type == 'numeric' else 'Текстовый'}\n"
-                    f"📝 Столбец добавлен в таблицу\n\n"
-                    f"💡 Теперь при записи данных бот спросит это значение.",
-                    reply_markup=get_measurements_keyboard()
-                )
-            else:
-                await callback.message.edit_text(
-                    f"✅ Измерение '{measurement_name}' добавлено в базу!\n\n"
-                    f"⚠️ Не удалось добавить столбец в таблицу. Попробуйте еще раз.",
-                    reply_markup=get_measurements_keyboard()
-                )
-        else:
-            await callback.message.edit_text(
-                f"✅ Измерение '{measurement_name}' добавлено в базу!\n\n"
-                f"⚠️ Таблица не подключена. Подключите таблицу для автоматического добавления столбцов.",
-                reply_markup=get_measurements_keyboard()
-            )
+        await callback.message.edit_text(
+            f"✅ Измерение '{measurement_name}' добавлено в таблицу!\n\n"
+            f"📊 Тип: {'Цифровой (0-' + str(max_value) + ')' if measurement_type == 'numeric' else 'Текстовый'}\n"
+            f"📝 Столбец добавлен в таблицу\n\n"
+            f"💡 Теперь при записи данных бот спросит это значение.",
+            reply_markup=get_measurements_keyboard()
+        )
     else:
         await callback.message.edit_text(
-            "❌ Ошибка при сохранении измерения. Попробуйте еще раз.",
+            "❌ Ошибка при добавлении измерения в таблицу. Попробуйте еще раз.",
             reply_markup=get_measurements_keyboard()
         )
     
