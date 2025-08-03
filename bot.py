@@ -157,15 +157,15 @@ async def add_column_to_sheet(sheet_id: str, column_name: str) -> bool:
         if not all_values:
             return False
         
-        # Получаем последний столбец (A=1, B=2, etc.)
-        last_column = len(all_values[0])
-        new_column_letter = chr(ord('A') + last_column)
+        # Получаем количество столбцов
+        num_columns = len(all_values[0])
         
-        # Добавляем заголовок в первую строку
-        sheet.update(f'{new_column_letter}1', column_name)
+        # Добавляем заголовок в последний столбец первой строки
+        last_column_letter = chr(ord('A') + num_columns)
+        sheet.update(f'{last_column_letter}1', column_name)
         
         # Форматируем заголовок
-        sheet.format(f'{new_column_letter}1', {
+        sheet.format(f'{last_column_letter}1', {
             'textFormat': {'bold': True},
             'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}
         })
