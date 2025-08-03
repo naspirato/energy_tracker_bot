@@ -15,6 +15,7 @@ class Database:
     async def init(self):
         """Инициализация базы данных"""
         async with aiosqlite.connect(self.db_path) as db:
+            # Таблица для привязок пользователей к таблицам
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS user_sheets (
                     user_id TEXT PRIMARY KEY,
@@ -23,6 +24,21 @@ class Database:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            
+            # Таблица для пользовательских измерений
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS custom_measurements (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    measurement_type TEXT NOT NULL CHECK(measurement_type IN ('numeric', 'text')),
+                    min_value INTEGER DEFAULT 0,
+                    max_value INTEGER DEFAULT 10,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES user_sheets (user_id) ON DELETE CASCADE
+                )
+            """)
+            
             await db.commit()
             logger.info("База данных инициализирована")
     
@@ -76,6 +92,62 @@ class Database:
                 return True
         except Exception as e:
             logger.error(f"Ошибка при удалении привязки таблицы для пользователя {user_id}: {e}")
+            return False
+    
+    # Методы для работы с пользовательскими измерениями
+    async def add_custom_measurement(self, user_id: str, name: str, measurement_type: str, min_value: int = 0, max_value: int = 10) -> bool:
+        """Добавить пользовательское измерение"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("""
+                    INSERT INTO custom_measurements (user_id, name, measurement_type, min_value, max_value)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (user_id, name, measurement_type, min_value, max_value))
+                await db.commit()
+                logger.info(f"Добавлено измерение '{name}' для пользователя {user_id}")
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении измерения для пользователя {user_id}: {e}")
+            return False
+    
+    async def get_custom_measurements(self, user_id: str) -> list:
+        """Получить все пользовательские измерения пользователя"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute("""
+                    SELECT id, name, measurement_type, min_value, max_value 
+                    FROM custom_measurements 
+                    WHERE user_id = ? 
+                    ORDER BY created_at
+                """, (user_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    return [
+                        {
+                            'id': row[0],
+                            'name': row[1],
+                            'type': row[2],
+                            'min_value': row[3],
+                            'max_value': row[4]
+                        }
+                        for row in rows
+                    ]
+        except Exception as e:
+            logger.error(f"Ошибка при получении измерений для пользователя {user_id}: {e}")
+            return []
+    
+    async def remove_custom_measurement(self, user_id: str, measurement_id: int) -> bool:
+        """Удалить пользовательское измерение"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("""
+                    DELETE FROM custom_measurements 
+                    WHERE id = ? AND user_id = ?
+                """, (measurement_id, user_id))
+                await db.commit()
+                logger.info(f"Удалено измерение {measurement_id} для пользователя {user_id}")
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка при удалении измерения для пользователя {user_id}: {e}")
             return False
 
 # Глобальный экземпляр базы данных
