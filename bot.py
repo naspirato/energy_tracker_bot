@@ -217,6 +217,18 @@ def get_template_choice_keyboard() -> InlineKeyboardMarkup:
     ])
     return keyboard
 
+def get_measurements_keyboard() -> InlineKeyboardMarkup:
+    """Создает клавиатуру для управления измерениями"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="➕ Добавить измерение", callback_data="add_measurement")
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")
+        ]
+    ])
+    return keyboard
+
 # Словарь user_id -> Google Sheet ID (загружается из БД при старте)
 user_sheets = {}
 
@@ -310,21 +322,7 @@ async def help_command(message: Message):
     await message.reply(help_text)
     logger.info(f"Отправлена справка пользователю {username}")
 
-@router.message(Command("addmeasurement"))
-async def add_measurement(message: Message, state: FSMContext):
-    """Начинает процесс добавления нового измерения"""
-    user_id = message.from_user.id
-    username = message.from_user.username or "Unknown"
-    logger.info(f"Команда /addmeasurement от пользователя {username} (ID: {user_id})")
-    
-    user_id_str = str(user_id)
-    if user_id_str not in user_sheets:
-        await message.reply("❌ Сначала подключите таблицу через /createsheet или /setsheet")
-        return
-    
-    await message.reply("📝 Введите название нового измерения:")
-    await state.set_state(MeasurementForm.measurement_name)
-    logger.info(f"Начато создание измерения для пользователя {username}")
+
 
 @router.message(Command("measurements"))
 async def show_measurements(message: Message):
@@ -337,7 +335,11 @@ async def show_measurements(message: Message):
     measurements = await db.get_custom_measurements(user_id_str)
     
     if not measurements:
-        await message.reply("📋 У вас пока нет пользовательских измерений.\n\nИспользуйте /addmeasurement для добавления нового измерения.")
+        await message.reply(
+            "📋 У вас пока нет пользовательских измерений.\n\n"
+            "💡 Нажмите 'Добавить измерение' для создания нового.",
+            reply_markup=get_measurements_keyboard()
+        )
         return
     
     measurements_text = "📋 Ваши измерения:\n\n"
@@ -347,9 +349,9 @@ async def show_measurements(message: Message):
         else:
             measurements_text += f"{i}. {measurement['name']} (текст)\n"
     
-    measurements_text += "\n💡 Используйте /addmeasurement для добавления нового измерения"
+    measurements_text += "\n💡 Нажмите 'Добавить измерение' для создания нового"
     
-    await message.reply(measurements_text)
+    await message.reply(measurements_text, reply_markup=get_measurements_keyboard())
     logger.info(f"Показаны измерения пользователю {username}")
 
 
@@ -623,8 +625,8 @@ async def handle_callback(callback: CallbackQuery, state: FSMContext):
         if not measurements:
             await callback.message.edit_text(
                 "📋 У вас пока нет пользовательских измерений.\n\n"
-                "💡 Используйте команду /addmeasurement для добавления нового измерения.",
-                reply_markup=get_main_keyboard()
+                "💡 Нажмите 'Добавить измерение' для создания нового.",
+                reply_markup=get_measurements_keyboard()
             )
         else:
             measurements_text = "📋 Ваши измерения:\n\n"
@@ -634,11 +636,11 @@ async def handle_callback(callback: CallbackQuery, state: FSMContext):
                 else:
                     measurements_text += f"{i}. {measurement['name']} (текст)\n"
             
-            measurements_text += "\n💡 Используйте /addmeasurement для добавления нового измерения"
+            measurements_text += "\n💡 Нажмите 'Добавить измерение' для создания нового"
             
             await callback.message.edit_text(
                 measurements_text,
-                reply_markup=get_main_keyboard()
+                reply_markup=get_measurements_keyboard()
             )
     
     elif data == "init_template_yes":
@@ -689,6 +691,48 @@ async def handle_callback(callback: CallbackQuery, state: FSMContext):
             "💡 Убедитесь, что ваша таблица содержит столбец с временем/датой.",
             reply_markup=get_main_keyboard()
         )
+    
+    elif data == "add_measurement":
+        # Начинаем процесс добавления измерения
+        await callback.message.edit_text(
+            "📊 Создание нового измерения\n\n"
+            "📝 Введите название измерения (например: 'Настроение', 'Энергия', 'Сон'):",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Отмена", callback_data="manage_measurements")]
+            ])
+        )
+        await state.set_state(MeasurementForm.measurement_name)
+    
+    elif data == "measurement_type_numeric":
+        # Пользователь выбрал цифровой тип
+        await callback.message.edit_text(
+            "🔢 Выбран цифровой тип\n\n"
+            "📊 Введите максимальное значение (от 1 до 100):",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Отмена", callback_data="manage_measurements")]
+            ])
+        )
+        await state.update_data(measurement_type="numeric")
+        await state.set_state(MeasurementForm.max_value)
+    
+    elif data == "measurement_type_text":
+        # Пользователь выбрал текстовый тип
+        await callback.message.edit_text(
+            "📝 Выбран текстовый тип\n\n"
+            "✅ Измерение будет сохранено как текстовое поле.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Отмена", callback_data="manage_measurements")]
+            ])
+        )
+        await state.update_data(measurement_type="text", max_value=0)
+        data = await state.get_data()
+        await save_measurement_callback(callback, data, user_id, username)
+    
+    elif data == "save_measurement":
+        # Сохраняем измерение
+        data = await state.get_data()
+        await save_measurement_callback(callback, data, user_id, username)
+        await state.clear()
         
     elif data == "show_help":
         help_text = """📚 Доступные команды:
@@ -993,7 +1037,23 @@ async def get_max_value(message: Message, state: FSMContext):
     
     await state.update_data(max_value=max_value)
     data = await state.get_data()
-    await save_measurement(message, state, data)
+    
+    # Создаем клавиатуру для подтверждения
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Сохранить", callback_data="save_measurement"),
+            InlineKeyboardButton(text="🔙 Отмена", callback_data="manage_measurements")
+        ]
+    ])
+    
+    measurement_name = data.get('measurement_name')
+    await message.reply(
+        f"📊 Подтвердите создание измерения:\n\n"
+        f"📝 Название: {measurement_name}\n"
+        f"🔢 Тип: Цифровой (0-{max_value})\n\n"
+        f"Нажмите 'Сохранить' для создания:",
+        reply_markup=keyboard
+    )
     logger.info(f"Получено максимальное значение от {username}: {max_value}")
 
 async def save_measurement(message: Message, state: FSMContext, data: dict):
@@ -1026,21 +1086,72 @@ async def save_measurement(message: Message, state: FSMContext, data: dict):
                 f"📊 Тип: {'Цифровой (0-' + str(max_value) + ')' if measurement_type == 'numeric' else 'Текстовый'}\n"
                 f"📝 Столбец добавлен в таблицу\n\n"
                 f"💡 Теперь при записи данных бот спросит это значение.",
-                reply_markup=get_main_keyboard()
+                reply_markup=get_measurements_keyboard()
             )
         else:
             await message.reply(
                 f"✅ Измерение '{measurement_name}' добавлено в базу!\n\n"
                 f"⚠️ Не удалось добавить столбец в таблицу. Попробуйте еще раз.",
-                reply_markup=get_main_keyboard()
+                reply_markup=get_measurements_keyboard()
             )
     else:
         await message.reply(
             "❌ Ошибка при сохранении измерения. Попробуйте еще раз.",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_measurements_keyboard()
         )
     
     await state.clear()
+    logger.info(f"Измерение сохранено для пользователя {username}: {measurement_name}")
+
+async def save_measurement_callback(callback: CallbackQuery, data: dict, user_id: int, username: str):
+    """Сохраняет новое измерение через callback"""
+    user_id_str = str(user_id)
+    
+    measurement_name = data.get('measurement_name')
+    measurement_type = data.get('measurement_type')
+    max_value = data.get('max_value', 10)
+    
+    # Сохраняем в базу данных
+    success = await db.add_custom_measurement(
+        user_id_str, 
+        measurement_name, 
+        measurement_type, 
+        0, 
+        max_value
+    )
+    
+    if success:
+        # Добавляем столбец в таблицу
+        if user_id_str in user_sheets:
+            sheet_id = user_sheets[user_id_str]
+            column_added = await add_column_to_sheet(sheet_id, measurement_name)
+            
+            if column_added:
+                await callback.message.edit_text(
+                    f"✅ Измерение '{measurement_name}' добавлено!\n\n"
+                    f"📊 Тип: {'Цифровой (0-' + str(max_value) + ')' if measurement_type == 'numeric' else 'Текстовый'}\n"
+                    f"📝 Столбец добавлен в таблицу\n\n"
+                    f"💡 Теперь при записи данных бот спросит это значение.",
+                    reply_markup=get_measurements_keyboard()
+                )
+            else:
+                await callback.message.edit_text(
+                    f"✅ Измерение '{measurement_name}' добавлено в базу!\n\n"
+                    f"⚠️ Не удалось добавить столбец в таблицу. Попробуйте еще раз.",
+                    reply_markup=get_measurements_keyboard()
+                )
+        else:
+            await callback.message.edit_text(
+                f"✅ Измерение '{measurement_name}' добавлено в базу!\n\n"
+                f"⚠️ Таблица не подключена. Подключите таблицу для автоматического добавления столбцов.",
+                reply_markup=get_measurements_keyboard()
+            )
+    else:
+        await callback.message.edit_text(
+            "❌ Ошибка при сохранении измерения. Попробуйте еще раз.",
+            reply_markup=get_measurements_keyboard()
+        )
+    
     logger.info(f"Измерение сохранено для пользователя {username}: {measurement_name}")
 
 async def main():
