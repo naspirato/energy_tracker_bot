@@ -65,10 +65,57 @@ async def initialize_table_template(sheet_id: str) -> bool:
             'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}
         })
         
-        # Настраиваем ширину колонок
-        sheet.set_column_width(1, 150)  # Время
-        sheet.set_column_width(2, 150)  # Настроение
-        sheet.set_column_width(3, 300)  # Комментарий
+        # Настраиваем ширину колонок (используем batch_update)
+        try:
+            requests = [
+                {
+                    'updateDimensionProperties': {
+                        'range': {
+                            'sheetId': sheet.id,
+                            'dimension': 'COLUMNS',
+                            'startIndex': 0,
+                            'endIndex': 1
+                        },
+                        'properties': {
+                            'pixelSize': 150
+                        },
+                        'fields': 'pixelSize'
+                    }
+                },
+                {
+                    'updateDimensionProperties': {
+                        'range': {
+                            'sheetId': sheet.id,
+                            'dimension': 'COLUMNS',
+                            'startIndex': 1,
+                            'endIndex': 2
+                        },
+                        'properties': {
+                            'pixelSize': 150
+                        },
+                        'fields': 'pixelSize'
+                    }
+                },
+                {
+                    'updateDimensionProperties': {
+                        'range': {
+                            'sheetId': sheet.id,
+                            'dimension': 'COLUMNS',
+                            'startIndex': 2,
+                            'endIndex': 3
+                        },
+                        'properties': {
+                            'pixelSize': 300
+                        },
+                        'fields': 'pixelSize'
+                    }
+                }
+            ]
+            
+            sheet.spreadsheet.batch_update({'requests': requests})
+        except Exception as width_error:
+            logger.warning(f"Не удалось установить ширину столбцов: {width_error}")
+            # Продолжаем без установки ширины
         
         logger.info(f"✅ Шаблон инициализирован для таблицы {sheet_id}")
         return True
@@ -160,6 +207,16 @@ def get_track_keyboard() -> InlineKeyboardMarkup:
     ])
     return keyboard
 
+def get_template_choice_keyboard() -> InlineKeyboardMarkup:
+    """Создает клавиатуру для выбора инициализации шаблона"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да, инициализировать", callback_data="init_template_yes"),
+            InlineKeyboardButton(text="❌ Нет, отменить", callback_data="init_template_no")
+        ]
+    ])
+    return keyboard
+
 # Словарь user_id -> Google Sheet ID (загружается из БД при старте)
 user_sheets = {}
 
@@ -173,7 +230,6 @@ class Form(StatesGroup):
     symptoms = State()
     notes = State()
     custom_measurement = State()  # Для пользовательских измерений
-    template_choice = State()  # Для выбора инициализации шаблона
 
 # FSM для создания измерений
 class MeasurementForm(StatesGroup):
@@ -322,12 +378,11 @@ async def set_sheet(message: Message, state: FSMContext):
             await message.reply(
                 "📋 Структура таблицы не подходит для работы с ботом.\n\n"
                 "Хотите инициализировать шаблон?\n"
-                "Это создаст столбцы: Время, Настроение (0-10), Комментарий\n\n"
-                "Отправьте 'да' для инициализации или 'нет' для отмены:"
+                "Это создаст столбцы: Время, Настроение (0-10), Комментарий",
+                reply_markup=get_template_choice_keyboard()
             )
             # Сохраняем ID таблицы во временное состояние
             await state.update_data(temp_sheet_id=sheet_id)
-            await state.set_state(Form.template_choice)
             return
         
         # Структура подходит, сохраняем таблицу
@@ -360,7 +415,7 @@ async def save_table_connection(message: Message, sheet_id: str, user_id: int, u
             )
         else:
             logger.error(f"Не удалось сохранить таблицу в БД для пользователя {username}")
-            await message.reply("❌ Ошибка при сохранении таблицы. Попробуйте еще раз.")
+            await message.reply("❌ Ошибка при сохранении таблицы. Попробуйте еще раз."        )
     except Exception as e:
         logger.error(f"Ошибка при сохранении в БД: {e}")
         # Сохраняем только в локальный словарь как fallback
@@ -368,6 +423,47 @@ async def save_table_connection(message: Message, sheet_id: str, user_id: int, u
         sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
         logger.warning(f"Сохранено только в локальный словарь для пользователя {username}")
         await message.reply(
+            f"✅ Таблица подключена! (временное сохранение)\n\n"
+            f"🔗 [Открыть таблицу]({sheet_url})\n\n"
+            f"📊 Теперь вы можете записывать данные о вашем состоянии.",
+            reply_markup=get_track_keyboard(),
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
+
+async def save_table_connection_callback(callback: CallbackQuery, sheet_id: str, user_id: int, username: str):
+    """Сохраняет подключение таблицы для callback"""
+    try:
+        success = await db.set_user_sheet(str(user_id), sheet_id)
+        if success:
+            # Обновляем локальный словарь
+            user_sheets[str(user_id)] = sheet_id
+            
+            sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+            logger.info(f"Таблица {sheet_id} подключена для пользователя {username}")
+            
+            # Обновляем сообщение с информацией о подключении
+            await callback.message.edit_text(
+                f"✅ Таблица подключена!\n\n"
+                f"🔗 [Открыть таблицу]({sheet_url})\n\n"
+                f"📊 Теперь вы можете записывать данные о вашем состоянии.",
+                reply_markup=get_track_keyboard(),
+                parse_mode="Markdown",
+                disable_web_page_preview=True
+            )
+        else:
+            logger.error(f"Не удалось сохранить таблицу в БД для пользователя {username}")
+            await callback.message.edit_text(
+                "❌ Ошибка при сохранении таблицы. Попробуйте еще раз.",
+                reply_markup=get_main_keyboard()
+            )
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении в БД: {e}")
+        # Сохраняем только в локальный словарь как fallback
+        user_sheets[str(user_id)] = sheet_id
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+        logger.warning(f"Сохранено только в локальный словарь для пользователя {username}")
+        await callback.message.edit_text(
             f"✅ Таблица подключена! (временное сохранение)\n\n"
             f"🔗 [Открыть таблицу]({sheet_url})\n\n"
             f"📊 Теперь вы можете записывать данные о вашем состоянии.",
@@ -544,6 +640,55 @@ async def handle_callback(callback: CallbackQuery, state: FSMContext):
                 measurements_text,
                 reply_markup=get_main_keyboard()
             )
+    
+    elif data == "init_template_yes":
+        # Инициализируем шаблон
+        await callback.answer("🔄 Инициализирую шаблон...")
+        
+        # Получаем ID таблицы из состояния
+        user_id_str = str(user_id)
+        temp_sheet_id = None
+        
+        # Попробуем получить из состояния или из текущей таблицы пользователя
+        if user_id_str in user_sheets:
+            temp_sheet_id = user_sheets[user_id_str]
+        else:
+            # Если нет в словаре, попробуем получить из БД
+            temp_sheet_id = await db.get_user_sheet(user_id_str)
+        
+        if not temp_sheet_id:
+            await callback.message.edit_text(
+                "❌ Не удалось найти ID таблицы. Попробуйте подключить таблицу еще раз.",
+                reply_markup=get_main_keyboard()
+            )
+            return
+        
+        success = await initialize_table_template(temp_sheet_id)
+        if success:
+            await callback.message.edit_text(
+                "✅ Шаблон инициализирован!\n\n"
+                "📋 Созданы столбцы:\n"
+                "• Время\n"
+                "• Настроение (0-10)\n"
+                "• Комментарий\n\n"
+                "💡 Теперь вы можете добавлять свои измерения через /addmeasurement",
+                reply_markup=get_main_keyboard()
+            )
+            # Сохраняем подключение таблицы
+            await save_table_connection_callback(callback, temp_sheet_id, user_id, username)
+        else:
+            await callback.message.edit_text(
+                "❌ Ошибка при инициализации шаблона.\n"
+                "Попробуйте еще раз или обратитесь к администратору.",
+                reply_markup=get_main_keyboard()
+            )
+    
+    elif data == "init_template_no":
+        await callback.message.edit_text(
+            "❌ Инициализация отменена.\n\n"
+            "💡 Убедитесь, что ваша таблица содержит столбец с временем/датой.",
+            reply_markup=get_main_keyboard()
+        )
         
     elif data == "show_help":
         help_text = """📚 Доступные команды:
@@ -781,48 +926,7 @@ async def save_complete_data(message: Message, state: FSMContext):
     await state.clear()
     logger.info(f"Состояние очищено для пользователя {username}")
 
-# Обработчик для выбора инициализации шаблона
-@router.message(Form.template_choice)
-async def handle_template_choice(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    username = message.from_user.username or "Unknown"
-    choice = message.text.lower().strip()
-    
-    data = await state.get_data()
-    temp_sheet_id = data.get('temp_sheet_id')
-    
-    if choice in ['да', 'yes', 'y', '1']:
-        # Инициализируем шаблон
-        success = await initialize_table_template(temp_sheet_id)
-        if success:
-            await message.reply(
-                "✅ Шаблон инициализирован!\n\n"
-                "📋 Созданы столбцы:\n"
-                "• Время\n"
-                "• Настроение (0-10)\n"
-                "• Комментарий\n\n"
-                "💡 Теперь вы можете добавлять свои измерения через /addmeasurement"
-            )
-            # Сохраняем подключение таблицы
-            await save_table_connection(message, temp_sheet_id, user_id, username)
-        else:
-            await message.reply(
-                "❌ Ошибка при инициализации шаблона.\n"
-                "Попробуйте еще раз или обратитесь к администратору."
-            )
-    elif choice in ['нет', 'no', 'n', '0']:
-        await message.reply(
-            "❌ Инициализация отменена.\n\n"
-            "💡 Убедитесь, что ваша таблица содержит столбец с временем/датой."
-        )
-    else:
-        await message.reply(
-            "❌ Пожалуйста, ответьте 'да' или 'нет':"
-        )
-        return
-    
-    await state.clear()
-    logger.info(f"Обработан выбор шаблона для пользователя {username}: {choice}")
+
 
 # Обработчики для создания измерений
 @router.message(MeasurementForm.measurement_name)
@@ -945,9 +1049,29 @@ async def main():
     try:
         # Инициализируем базу данных
         logger.info("🗄️ Инициализация базы данных...")
+        logger.info(f"📁 Путь к базе данных: {db.db_path}")
         try:
             await db.init()
             logger.info("✅ База данных инициализирована успешно")
+            
+            # Проверяем работоспособность базы данных
+            logger.info("🔍 Проверка работоспособности базы данных...")
+            test_user_id = "startup_test_user"
+            test_sheet_id = "startup_test_sheet"
+            
+            # Тестируем запись и чтение
+            success = await db.set_user_sheet(test_user_id, test_sheet_id)
+            if success:
+                retrieved_sheet = await db.get_user_sheet(test_user_id)
+                if retrieved_sheet == test_sheet_id:
+                    logger.info("✅ База данных работает корректно")
+                    # Удаляем тестовые данные
+                    await db.remove_user_sheet(test_user_id)
+                else:
+                    logger.warning("⚠️ База данных работает частично (чтение)")
+            else:
+                logger.warning("⚠️ База данных работает частично (запись)")
+                
         except Exception as e:
             logger.error(f"❌ Ошибка при инициализации БД: {e}")
             logger.warning("⚠️ Продолжаем работу без базы данных")
@@ -958,6 +1082,15 @@ async def main():
         try:
             user_sheets = await db.get_all_user_sheets()
             logger.info(f"✅ Загружено {len(user_sheets)} привязок пользователей к таблицам")
+            
+            # Логируем информацию о загруженных пользователях
+            if user_sheets:
+                logger.info("📋 Загруженные пользователи:")
+                for user_id, sheet_id in user_sheets.items():
+                    logger.info(f"   Пользователь {user_id} -> Таблица {sheet_id}")
+            else:
+                logger.info("📋 Пользователи не найдены (это нормально для нового деплоя)")
+                
         except Exception as e:
             logger.error(f"❌ Ошибка при загрузке данных из БД: {e}")
             user_sheets = {}
