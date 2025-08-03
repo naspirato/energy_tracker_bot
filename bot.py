@@ -1161,6 +1161,24 @@ async def main():
         # Инициализируем базу данных
         logger.info("🗄️ Инициализация базы данных...")
         logger.info(f"📁 Путь к базе данных: {db.db_path}")
+        
+        # Проверяем, нужно ли мигрировать данные из временной базы
+        temp_db_path = "/tmp/bot_data.db"
+        if os.path.exists(temp_db_path) and not os.path.exists(db.db_path):
+            logger.info("🔄 Обнаружена временная база данных, выполняем миграцию...")
+            try:
+                import shutil
+                # Создаем директорию для постоянной базы
+                persistent_dir = os.path.dirname(db.db_path)
+                if not os.path.exists(persistent_dir):
+                    os.makedirs(persistent_dir, exist_ok=True)
+                
+                # Копируем данные
+                shutil.copy2(temp_db_path, db.db_path)
+                logger.info("✅ Данные мигрированы в постоянную базу")
+            except Exception as e:
+                logger.error(f"❌ Ошибка при миграции данных: {e}")
+        
         try:
             await db.init()
             logger.info("✅ База данных инициализирована успешно")

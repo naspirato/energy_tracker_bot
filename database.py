@@ -8,12 +8,21 @@ logger = logging.getLogger(__name__)
 class Database:
     def __init__(self, db_path: str = None):
         if db_path is None:
-            # В Railway используем переменную окружения или временную директорию
-            db_path = os.getenv('DATABASE_PATH', '/tmp/bot_data.db')
+            # В Railway используем переменную окружения или постоянную директорию
+            db_path = os.getenv('DATABASE_PATH', '/app/data/bot_data.db')
         self.db_path = db_path
     
     async def init(self):
         """Инициализация базы данных"""
+        # Создаем директорию для базы данных, если она не существует
+        db_dir = os.path.dirname(self.db_path)
+        if not os.path.exists(db_dir):
+            try:
+                os.makedirs(db_dir, exist_ok=True)
+                logger.info(f"Создана директория для базы данных: {db_dir}")
+            except Exception as e:
+                logger.error(f"Ошибка при создании директории {db_dir}: {e}")
+        
         async with aiosqlite.connect(self.db_path) as db:
             # Таблица для привязок пользователей к таблицам
             await db.execute("""
@@ -40,7 +49,7 @@ class Database:
             """)
             
             await db.commit()
-            logger.info("База данных инициализирована")
+            logger.info(f"База данных инициализирована: {self.db_path}")
     
     async def set_user_sheet(self, user_id: str, sheet_id: str) -> bool:
         """Установить таблицу для пользователя"""
